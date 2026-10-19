@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "cloudphone.Application": {
+            "title": "穿云投屏",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "gatewayPrefix": "/app/cloudphone",
+            "gatewaySocket": "app.sock",
+            "url": "/app/cloudphone/",
+            "allUsers": true
+        }
+    }
+}

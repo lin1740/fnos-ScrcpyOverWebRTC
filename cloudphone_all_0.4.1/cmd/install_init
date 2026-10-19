@@ -1,0 +1,115 @@
+#!/bin/bash
+
+### 安装前检查（用户点击安装后、正式安装前执行）
+### 失败时把中文原因写入 $TRIM_TEMP_LOGFILE 并 exit 1，应用中心会把内容展示给用户。
+
+FEEDBACK_INFO="反馈：项目 https://github.com/hqw700/ScrcpyOverWebRTC"
+TEMP_LOG="${TRIM_TEMP_LOGFILE:-/tmp/cloudphone-install-msg.txt}"
+
+fail() {
+    {
+        echo "$1"
+        echo "$FEEDBACK_INFO"
+    } > "$TEMP_LOG" 2>/dev/null || true
+    exit 1
+}
+
+### 1) 架构：穿云投屏镜像仅提供 x86_64 与 arm64
+case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64|aarch64|arm64) : ;;
+    *)
+        fail "本机架构为 $(uname -m)，穿云投屏镜像仅提供 x86_64 与 arm64（aarch64）。
+请改用 64 位设备安装。"
+        ;;
+esac
+
+### 2) Docker 可用性
+if ! command -v docker >/dev/null 2>&1; then
+    fail "未检测到 Docker。请先在飞牛「应用中心 → Docker」中启用 Docker 服务后重试。"
+fi
+if ! docker info >/dev/null 2>&1; then
+    fail "Docker 服务未运行或当前用户无权访问 Docker。
+请确认 Docker 已启动，并确认本应用已获得 Docker 组权限（config/privilege 声明 groupname=docker）。"
+fi
+
+### 2.5) 数据卷预创建（关键）：compose 把数据卷声明为 external，
+###      卷必须先存在，否则飞牛 docker-project 解析 compose 时
+###      报「external volume not found」直接中止安装。
+###      install_callback 里也会建，但那一步在 compose 启动之后才执行，来不及。
+VOL="cloudphone-webrtc-data"
+if ! docker volume inspect "$VOL" >/dev/null 2>&1; then
+    docker volume create "$VOL" >/dev/null 2>&1 || true
+fi
+
+### 2.6) 清理上次失败安装遗留的同名容器：
+###      残留容器（哪怕停在 Created 状态）会占用 cloudphone-webrtc 这个名字，
+###      导致本次 compose 建容器时报「Conflict. The container name ... is already in use」。
+###      能走到安装流程，说明应用当前未安装，该容器必然是残留，删之无副作用。
+docker rm -f cloudphone-webrtc >/dev/null 2>&1 || true
+
+### 3) 磁盘空间（镜像 + 数据，留 1GB 余量）
+AVAIL_KB=$(df -Pk "${TRIM_APPDEST:-/var/apps/cloudphone}" 2>/dev/null | awk 'NR==2{print $4}')
+case "${AVAIL_KB:-}" in
+    ''|*[!0-9]*) AVAIL_KB=0 ;;
+esac
+if [ "$AVAIL_KB" -gt 0 ] && [ "$AVAIL_KB" -lt 1048576 ]; then
+    fail "磁盘可用空间不足 1GB（当前约 $((AVAIL_KB / 1024))MB）。
+穿云投屏镜像与运行数据需要约 500MB～1GB。请清理空间后重试。"
+fi
+
+### 4) 内存（webrtc 轻量，低于 512MB 才拦截）
+MEM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+case "${MEM_MB:-}" in ''|*[!0-9]*) MEM_MB=0 ;; esac
+if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 512 ]; then
+    fail "可用内存不足 512MB（当前约 ${MEM_MB}MB）。请增加内存后重试。"
+fi
+
+### 4.5) 端口占用硬拦截（关键）：
+###   飞牛 docker-project 建容器时端口被占用会失败，应用装上了却「启用」报
+###   12005 no container to start（前端显示 docker不可用）。宁可在安装前就拦住，
+###   也不要把用户留在「装上了但用不了」的状态。用户可在向导里换端口后重装。
+_WEB="${wizard_web_port:-}"; _TURN="${wizard_turn_port:-}"; _RELAY="${wizard_relay_range:-}"
+case "$_WEB" in ''|*[!0-9]*) _WEB=8443 ;; esac
+case "$_TURN" in ''|*[!0-9]*) _TURN=3478 ;; esac
+case "$_RELAY" in
+    ''|*[!0-9-]*) _RMIN=50000 ;;
+    *-*) _RMIN="${_RELAY%%-*}" ;;
+    *) _RMIN="$_RELAY" ;;
+esac
+case "$_RMIN" in ''|*[!0-9]*) _RMIN=50000 ;; esac
+
+_port_busy() {
+    ss -lntu 2>/dev/null | awk 'NR>1{print $5}' | grep -q ":$1\$"
+}
+_conflict=""
+# 自己的容器在跑（重装/修复场景）时跳过，避免把自己的端口当成冲突
+if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^cloudphone-webrtc$'; then
+    _port_busy "$_WEB"  && _conflict="$_conflict 画面端口 $_WEB"
+    _port_busy "$_TURN" && _conflict="$_conflict TURN端口 $_TURN"
+    _port_busy "$_RMIN" && _conflict="$_conflict 中继段起点 $_RMIN"
+fi
+if [ -n "$_conflict" ]; then
+    fail "端口被占用：$_conflict
+
+这些端口可能已被「安卓模拟器」等其它应用占用。请：
+· 在安装向导「端口设置」里改用空闲端口（例如 9443 / 3479 / 61000-61100），或
+· 先停止占用该端口的应用，再重试安装。
+
+本次安装未做任何改动。"
+fi
+
+### 5) 预拉取镜像（按 runtime.conf 的版本策略：默认钉死 digest，加速源优先 → 官方回退）
+### 说明：飞牛 docker-project 在安装/更新时会执行 compose pull；compose 的
+### pull_policy=missing 只在「本地已有镜像」时跳过，镜像缺失就会直连
+### registry-1.docker.io —— 国内经常超时，失败后飞牛会回滚安装。
+### 所以这里主动备齐镜像，任一源成功即止；全部失败就带原因中止本次安装。
+if [ -f "${TRIM_APPDEST}/scripts/pull_image.sh" ]; then
+    if ! bash "${TRIM_APPDEST}/scripts/pull_image.sh" >/dev/null 2>&1; then
+        fail "无法准备穿云投屏镜像：所有加速源与 Docker Hub 官方源均不可达。
+· 请检查 NAS 外网/代理是否正常；
+· 或在「Docker → 设置 → 镜像加速器」中换成可用的加速源后重试。
+本次安装已中止，未改动现有安装与数据。"
+    fi
+fi
+
+exit 0

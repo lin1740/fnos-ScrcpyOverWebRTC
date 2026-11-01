@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+cloudphone（穿云投屏）主启动脚本
+- start : 启动飞牛网关代理 + 画面服务看护
+- stop  : 停止容器与后台进程
+- status: 画面服务容器是否在运行（0=在运行，3=未运行）
+"""
+import os
+import sys
+import time
+import subprocess
+import signal
+
+APP_DEST = os.environ.get("TRIM_APPDEST", "/var/apps/cloudphone/target")
+VAR_DIR = os.environ.get("TRIM_PKGVAR", "/var/apps/cloudphone/var")
+COMPOSE = os.path.join(APP_DEST, "docker", "docker-compose.yaml")
+GATEWAY_PY = os.path.join(APP_DEST, "server", "gateway.py")
+WATCHDOG_SH = os.path.join(APP_DEST, "scripts", "webrtc_watchdog.sh")
+GATEWAY_PID = os.path.join(VAR_DIR, "gateway.pid")
+
+os.makedirs(VAR_DIR, exist_ok=True)
+
+
+def log(msg):
+    try:
+        with open(os.path.join(VAR_DIR, "main.log"), "a") as f:
+            f.write("[%s] %s\n" % (time.strftime("%F %T"), msg))
+    except Exception:
+        pass
+
+
+def run(cmd, timeout=60):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout)
+    except Exception as e:
+        log("命令执行异常：%s -> %r" % (cmd, e))
+        return None
+
+
+def is_gateway_running():
+    """PID + cmdline + socket 三重校验，避免 PID 复用误判。"""
+    try:
+        with open(GATEWAY_PID) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            if b"gateway.py" not in f.read():
+                return False
+        return os.path.exists(os.path.join(APP_DEST, "app.sock"))
+    except Exception:
+        return False
+
+
+def start_gateway():
+    """网关自带守护循环（gateway.py supervise），这里只做幂等启动。"""
+    if not os.path.exists(GATEWAY_PY):
+        log("未找到网关程序：%s" % GATEWAY_PY)
+        return
+    try:
+        r = subprocess.run(["python3", GATEWAY_PY, "start"], capture_output=True, timeout=60,
+                           env={**os.environ, "TRIM_APPDEST": APP_DEST, "TRIM_PKGVAR": VAR_DIR})
+        out = (r.stdout or b"").decode("utf-8", "replace").strip()
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        log("网关启动：%s%s" % (out, (" ｜ " + err) if err else ""))
+    except Exception as e:
+        log("网关启动失败：%r" % (e,))
+
+
+def stop_gateway():
+    if not os.path.exists(GATEWAY_PY):
+        return
+    try:
+        r = subprocess.run(["python3", GATEWAY_PY, "stop"], capture_output=True, timeout=60,
+                           env={**os.environ, "TRIM_APPDEST": APP_DEST, "TRIM_PKGVAR": VAR_DIR})
+        log("网关停止：%s" % (r.stdout or b"").decode("utf-8", "replace").strip())
+    except Exception as e:
+        log("网关停止失败：%r" % (e,))
+
+
+def start_watchdog():
+    if not os.path.exists(WATCHDOG_SH):
+        log("未找到看护脚本：%s" % WATCHDOG_SH)
+        return
+    try:
+        r = subprocess.run(["bash", WATCHDOG_SH, "install"], capture_output=True, timeout=30,
+                           env={**os.environ, "TRIM_APPDEST": APP_DEST, "TRIM_PKGVAR": VAR_DIR})
+        log("画面服务看护：%s" % (r.stdout or b"").decode("utf-8", "replace").strip())
+    except Exception as e:
+        log("画面服务看护启动失败：%r" % (e,))
+
+
+def stop_watchdog():
+    if not os.path.exists(WATCHDOG_SH):
+        return
+    try:
+        subprocess.run(["bash", WATCHDOG_SH, "remove"], capture_output=True, timeout=30,
+                       env={**os.environ, "TRIM_APPDEST": APP_DEST, "TRIM_PKGVAR": VAR_DIR})
+    except Exception:
+        pass
+
+
+def start():
+    log("=== 启动 cloudphone 0.4.3 ===")
+    # 确保本地稳定 tag 的镜像存在：compose 引用 cloudphone-cache/webrtc:pinned，
+    # 镜像缺失时 compose 不会联网拉取（会直接失败）→ 启用时先补一次，幂等且很快。
+    pull = os.path.join(APP_DEST, "scripts", "pull_image.sh")
+    if os.path.exists(pull):
+        try:
+            r = subprocess.run(["bash", pull], capture_output=True, timeout=900,
+                               env={**os.environ, "TRIM_APPDEST": APP_DEST, "TRIM_PKGVAR": VAR_DIR})
+            log("镜像检查：%s" % (r.stdout or b"").decode("utf-8", "replace").strip()[-300:])
+        except Exception as e:
+            log("镜像检查失败：%r" % (e,))
+    start_gateway()
+    start_watchdog()
+    log("启动完成")
+
+
+def stop():
+    log("=== 停止 cloudphone ===")
+    if os.path.exists(COMPOSE):
+        run("cd %s && docker compose -p cloudphone stop -t 30" % os.path.dirname(COMPOSE), timeout=60)
+    stop_watchdog()
+    stop_gateway()
+    log("停止完成")
+
+
+def status():
+    result = run("docker ps --filter name=cloudphone-webrtc --format '{{.Names}}'", timeout=10)
+    if result and b"cloudphone-webrtc" in result.stdout:
+        sys.exit(0)
+    sys.exit(3)
+
+
+if __name__ == "__main__":
+    action = sys.argv[1] if len(sys.argv) > 1 else "start"
+    if action == "start":
+        start()
+    elif action == "stop":
+        stop()
+    elif action == "status":
+        status()
+    else:
+        print("用法：%s {start|stop|status}" % sys.argv[0])
+        sys.exit(1)

@@ -1,0 +1,19 @@
+appname                    = cloudphone
+version                    = 0.4.3
+display_name               = 穿云投屏
+desc                       = 在飞牛 fnOS 上运行穿云投屏服务端：用浏览器即可远程查看与操控安卓设备，不用安装不必要的客户端。安卓手机/平板/云机通过官方 Agent 接入。默认管理员 admin / 密码 admin123，登录后请立即修改。默认端口 8443（画面与信令）、3478（TURN）、50000-50100（媒体中继），安装向导可自定义。本应用为飞牛平台的非官方第三方封装，完全免费开源、非商业，不收取任何费用；上游穿云投屏的二进制组件由其作者提供，设备数量等增值授权为上游第三方付费服务，与飞牛官方及本应用发布者无关，不付费不影响基础功能。
+platform                   = all
+source                     = thirdparty
+os_min_version             = 1.1.8
+maintainer                 = hqw700
+maintainer_url             = https://github.com/hqw700/ScrcpyOverWebRTC
+distributor                = 键盘敲粥香
+distributor_url            = https://www.lin1740.de5.net/
+desktop_uidir              = ui
+desktop_applaunchname      = cloudphone.Application
+service_port               = 8443
+checkport                  = false
+# 本应用不需要用户选择文件/目录授权，隐藏该设置以最小化权限面
+disable_authorization_path = true
+# 应用中心「更新内容」展示用（飞牛 fpk 限制 changelog 须单行，否则安装报 10111；已去版本号字样，按 1.同步(上游) 2.修复 3.优化 4.增加 框架）
+changelog                  = 1.同步了上游 0.4.2、0.4.3 版本 — 跟进上游的功能与修复，并移除设备端 Agent 的测试到期限制，避免到期后 Agent 无法启动连接。2.修复了应用停用后画面服务被自动拉起的问题 — 飞牛停用只停容器、不通知应用，旧看护 15~30 秒内又把容器启动，导致停用形同虚设；现在容器持续停止 5 分钟后看护休眠并停止网关，启用后自动恢复。3.修复了保留数据卸载重装时误报「数据恢复失败」的问题 — 恢复动作改到镜像就绪之后执行，并区分「数据卷为空」与「读取数据卷失败」，不再出现误导性提示。4.优化了停用期间的后台进程 — 判定停用后网关随看护一起停止，减少常驻进程。5.增加了禁用应用内更新弹窗 — 应用版本随包固定、无需提示更新，登录后不再自动弹出更新提示。

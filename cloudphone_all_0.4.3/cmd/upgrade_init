@@ -1,0 +1,74 @@
+#!/bin/bash
+
+### 升级前：镜像版本策略处理
+###
+### 默认（PIN=1，钉死 digest）：升级 **不会** 自动拉新镜像 —— 这是有意为之。
+###   上游只发 :latest，若升级时盲目拉取，上游一发新版（如 0.4.2）用户就会被
+###   强制升级到未经验证的版本，可能与本包的配置/脚本不匹配而直接坏掉。
+###   正确的升级路径是显式执行：bash scripts/set_image.sh --upgrade
+###   （拉取 :latest → 冒烟校验 → 切到新 digest，失败自动回退）。
+### 跟随模式（PIN=0）：升级时拉取 :latest 并冒烟校验。
+
+set -u
+APP_DIR="${TRIM_APPDEST:-/var/apps/cloudphone/target}"
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/cloudphone/var}"
+LOG="$VAR_DIR/upgrade.log"
+mkdir -p "$VAR_DIR" 2>/dev/null || true
+exec >>"$LOG" 2>&1
+if : >>"$LOG" 2>/dev/null; then exec >>"$LOG" 2>&1; fi
+
+say(){ echo "[$(date '+%F %T')] $*"; }
+say "==== upgrade_init 开始 ===="
+
+PIN="1"; DIGEST=""
+if [ -f "$APP_DIR/scripts/rtconf.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$APP_DIR/scripts/rtconf.sh"
+    rtconf_load
+fi
+PIN="${WEBRTC_PIN:-1}"
+DIGEST="${WEBRTC_DIGEST:-}"
+if [ -f "$VAR_DIR/image.conf" ]; then
+    _v=$(sed -n 's/^PIN=//p' "$VAR_DIR/image.conf" | head -n1); [ -n "$_v" ] && PIN="$_v"
+    _v=$(sed -n 's/^DIGEST=//p' "$VAR_DIR/image.conf" | head -n1); [ -n "$_v" ] && DIGEST="$_v"
+fi
+case "$PIN" in 0|false|no) PIN=0 ;; *) PIN=1 ;; esac
+
+if [ "$PIN" = "1" ]; then
+    say "镜像策略=钉死 digest（${DIGEST:-未设置}）：升级不自动拉新镜像，保持已验证版本"
+    say "如需升级到上游最新版，请执行：bash $APP_DIR/scripts/set_image.sh --upgrade"
+    say "==== upgrade_init 完成 ===="
+    exit 0
+fi
+
+say "镜像策略=跟随 :latest：拉取并冒烟校验"
+
+if [ -f "$APP_DIR/scripts/pull_image.sh" ]; then
+    if bash "$APP_DIR/scripts/pull_image.sh" --force 2>&1 | sed 's/^/  /'; then
+        say "镜像刷新完成"
+    else
+        say "镜像刷新失败：保持现有镜像继续升级（不阻断）"
+        say "==== upgrade_init 完成 ===="
+        exit 0
+    fi
+fi
+
+REF="$ACCEL_PREFIX/$WEBRTC_REPO:$WEBRTC_TAG"
+PREV_ID="$(docker image inspect -f '{{.Id}}' "$REF" 2>/dev/null | head -n1)"
+
+### 冒烟校验：镜像必须包含上游关键文件，否则不采用
+if ! docker run --rm --entrypoint /bin/sh "$REF" -c \
+        'test -f /app/entrypoint.sh && test -x /app/webrtc-signaling && test -x /usr/bin/turnserver' >/dev/null 2>&1; then
+    say "冒烟校验失败：镜像缺少 /app/entrypoint.sh 或 webrtc-signaling 或 turnserver"
+    if [ -n "${PREV_ID:-}" ]; then
+        docker tag "$PREV_ID" "$REF" >/dev/null 2>&1 \
+            && say "已回退到升级前镜像（$PREV_ID）" \
+            || say "回退失败；升级仍继续，若启动异常请重装本应用"
+    fi
+    say "==== upgrade_init 完成 ===="
+    exit 0
+fi
+say "冒烟校验通过"
+
+say "==== upgrade_init 完成 ===="
+exit 0

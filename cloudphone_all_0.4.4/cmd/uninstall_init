@@ -1,0 +1,60 @@
+#!/bin/bash
+
+### 卸载前：停止后台进程与容器（不删数据，删除动作在 uninstall_callback 里按向导决定）
+
+set -u
+APP_DIR="${TRIM_APPDEST:-/var/apps/cloudphone/target}"
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/cloudphone/var}"
+COMPOSE="$APP_DIR/docker/docker-compose.yaml"
+LOG="$VAR_DIR/uninstall.log"
+
+mkdir -p "$VAR_DIR" 2>/dev/null || true
+if : >>"$LOG" 2>/dev/null; then exec >>"$LOG" 2>&1; fi
+say(){ echo "[$(date '+%F %T')] $*"; }
+say "==== uninstall_init 开始 ===="
+
+### 1) 停止看护（脚本 remove + 进程兜底：历史上有旧版看护循环残留、pid 文件对不上杀不掉，
+###    残留看护会在卸载过程中把容器和网关反复拉起来，必须先杀干净）
+if [ -f "$APP_DIR/scripts/webrtc_watchdog.sh" ]; then
+    bash "$APP_DIR/scripts/webrtc_watchdog.sh" remove >/dev/null 2>&1 || true
+    say "看护已停止"
+fi
+pkill -9 -f 'cloudphone.*webrtc_watchdog\.sh' >/dev/null 2>&1 || true
+pkill -9 -f '/var/apps/cloudphone/.*webrtc_watchdog\.sh' >/dev/null 2>&1 || true
+
+### 2) 停止网关（supervise 进程单独兜底）
+if [ -f "$APP_DIR/server/gateway.py" ]; then
+    python3 "$APP_DIR/server/gateway.py" stop >/dev/null 2>&1 || true
+    say "网关已停止"
+fi
+pkill -9 -f 'cloudphone/target/server/gateway\.py' >/dev/null 2>&1 || true
+
+### 3) 停止容器（保留数据卷）
+if [ -f "$COMPOSE" ]; then
+    ( cd "$APP_DIR/docker" && timeout 120 docker compose -p cloudphone stop -t 30 ) >/dev/null 2>&1 || true
+    say "容器已停止（数据卷保留）"
+fi
+
+### 3.5) 数据卷备份（无条件做一次，几秒钟）：
+###  飞牛卸载应用时会对 docker project 执行 down（可能带 -v），普通命名卷会被连带删除 ——
+###  群友实测「保留数据卸载，重装后数据全丢」。把卷内容打包到 var 目录，
+###  重装时 install_callback 检测到卷为空就自动恢复，双保险。
+BK="$VAR_DIR/webrtc-data-backup.tar.gz"
+if docker volume inspect cloudphone-webrtc-data >/dev/null 2>&1; then
+    _IMG="$(sed -n 's|^image:[[:space:]]*||p' "$COMPOSE" 2>/dev/null | head -n1 | tr -d '\"')"
+    [ -n "$_IMG" ] || _IMG="docker.fnnas.com/buutuu/scrcpy-over-webrtc:latest"
+    say "正在备份数据卷到 $BK ..."
+    # 必须覆盖 ENTRYPOINT：上游镜像的 ENTRYPOINT=/app/entrypoint.sh，直接 `docker run IMG sh -c ...`
+    # 会把 sh -c ... 当成启动参数喂给 entrypoint → 起了一个投屏服务容器、tar 永不执行 →
+    # 卸载流程卡死（应用中心报错、容器/镜像残留）。--entrypoint sh 才是真跑命令。
+    # timeout 兜底：任何情况下都不许卡住卸载。
+    timeout 180 docker run --rm --entrypoint sh -v cloudphone-webrtc-data:/data -v "$VAR_DIR":/backup "$_IMG" \
+        -c 'cd /data && tar czf /backup/webrtc-data-backup.tar.gz . 2>/dev/null' >/dev/null 2>&1 \
+        && say "备份完成（$(du -h "$BK" 2>/dev/null | cut -f1)）" \
+        || say "警告：数据卷备份失败（卷不存在或为空可忽略）"
+else
+    say "数据卷不存在，跳过备份"
+fi
+
+say "==== uninstall_init 完成 ===="
+exit 0

@@ -1,5 +1,7 @@
 # 穿云投屏（fnOS）— CloudPhone for fnOS
 
+**中文** | [English](README.en.md)
+
 在飞牛 fnOS 上一键部署**穿云投屏**服务端：用浏览器就能远程查看与操控安卓设备，不用装多余的客户端。
 
 本仓库是 [ScrcpyOverWebRTC](https://github.com/hqw700/ScrcpyOverWebRTC)（作者 hqw700）在飞牛 fnOS 上的**第三方非官方封装**，收录 FPK 打包脚本、容器编排、统一网关接入与安装/升级/运维脚本（对应源码目录：`cloudphone_all_<版本>`）。
